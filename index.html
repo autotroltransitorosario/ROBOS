@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mapa de Artefactos Robados · Rosario</title>
+<meta name="description" content="Mapa de reportes de robo de equipamiento de alumbrado público en Rosario">
+<meta name="theme-color" content="#1B2430">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <h1>Mapa de <span>Artefactos Robados</span> · Rosario</h1>
+    <div class="stats" id="stats">
+      <span>Puntos: <b id="stat-total">–</b></span>
+      <span>Visibles: <b id="stat-visible">–</b></span>
+      <span>Período: <b id="stat-range">–</b></span>
+    </div>
+  </header>
+
+  <div class="datefilter">
+    <div class="filter-row">
+      <span class="filter-label">Mostrando desde <strong id="filter-date-label">todas las fechas</strong></span>
+      <button class="btn-reset" id="btn-reset">Ver todo el período</button>
+    </div>
+    <div class="date-scroll" id="date-scroll" aria-label="Filtro de fecha, desplazable"></div>
+  </div>
+
+  <div class="map-wrap">
+    <div id="map"></div>
+    <div class="map-badge">
+      Robos de equipamiento de alumbrado público — Rosario
+    </div>
+    <div class="geo-progress" id="geo-progress">
+      Ubicando direcciones… <span id="geo-count">0 / 0</span>
+      <div class="bar"><i id="geo-bar"></i></div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
