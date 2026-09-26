@@ -76,13 +76,16 @@ function parseFechaFlexible(raw) {
   return { iso, display };
 }
 
-// Acepta "lat, lng" o "lat,lng" en una misma celda
+// Acepta "lat, lng" con separador decimal '.' o ',' (coma o punto),
+// separados por coma, punto y coma o espacio, y tolera texto extra
+// alrededor (ej. "Lat: -32,9468 Lng: -60,6393").
 function parseCoordenadas(raw) {
   if (!raw) return null;
-  const parts = String(raw).split(',').map((s) => s.trim());
-  if (parts.length !== 2) return null;
-  const lat = parseFloat(parts[0].replace(',', '.'));
-  const lon = parseFloat(parts[1].replace(',', '.'));
+  const matches = String(raw).match(/-?\d{1,3}(?:[.,]\d+)?/g);
+  if (!matches || matches.length < 2) return null;
+  const toNum = (s) => parseFloat(s.replace(',', '.'));
+  const lat = toNum(matches[0]);
+  const lon = toNum(matches[1]);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
   if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
   if (lat === 0 && lon === 0) return null;
@@ -262,9 +265,15 @@ function processTable(table) {
     idx[key] = colIndex(labels, wanted);
   });
 
+  const missing = Object.entries(CONFIG.columns)
+    .filter(([key]) => idx[key] === -1)
+    .map(([, wanted]) => wanted);
+
   const records = [];
   let totalRows = 0;
   let noCoord = 0;
+  let emptyCoordCell = 0;
+  let unparsableSamples = [];
 
   (table.rows || []).forEach((row) => {
     if (!row.c) return;
@@ -275,7 +284,15 @@ function processTable(table) {
 
     const coordRaw = cellText(row, idx.coordenadas);
     const coords = parseCoordenadas(coordRaw);
-    if (!coords) { noCoord++; return; } // solo mostramos puntos con coordenadas
+    if (!coords) {
+      noCoord++;
+      if (!coordRaw) {
+        emptyCoordCell++;
+      } else if (unparsableSamples.length < 5) {
+        unparsableSamples.push(coordRaw);
+      }
+      return; // solo mostramos puntos con coordenadas
+    }
 
     const fecha = parseFechaFlexible(fechaRaw);
     if (!fecha) { noCoord++; return; }
@@ -298,7 +315,7 @@ function processTable(table) {
     });
   });
 
-  return { records, totalRows, noCoord };
+  return { records, totalRows, noCoord, missing, labels, emptyCoordCell, unparsableSamples };
 }
 
 async function loadData(isManualRefresh) {
@@ -308,7 +325,7 @@ async function loadData(isManualRefresh) {
 
   try {
     const table = await fetchSheet();
-    const { records, totalRows, noCoord } = processTable(table);
+    const { records, totalRows, noCoord, missing, labels, emptyCoordCell, unparsableSamples } = processTable(table);
 
     state.records = records;
     state.totalRows = totalRows;
@@ -332,7 +349,20 @@ async function loadData(isManualRefresh) {
     rebuildMarkers();
 
     const now = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-    setStatus(`Actualizado ${now} · ${records.length} con coordenadas`, 'ok');
+
+    if (missing.length) {
+      console.warn('Columnas no encontradas:', missing, '— encabezados reales:', labels);
+      setStatus(`Faltan columnas: ${missing.join(', ')}. Encabezados leídos: ${labels.filter(Boolean).join(' | ')}`, 'error');
+    } else if (records.length === 0 && totalRows > 0 && emptyCoordCell === totalRows) {
+      setStatus(`${totalRows} filas leídas, pero la columna Coordenadas está vacía en todas. Cargá al menos una para probar.`, 'error');
+    } else if (records.length === 0 && totalRows > 0) {
+      console.warn('Valores de Coordenadas que no se pudieron interpretar:', unparsableSamples);
+      setStatus(`${totalRows} filas leídas. ${emptyCoordCell} sin nada en Coordenadas, y ${totalRows - emptyCoordCell} con un valor que no pude interpretar (ver consola: ${unparsableSamples.slice(0,2).join(' | ')})`, 'error');
+    } else if (totalRows === 0) {
+      setStatus('La planilla respondió, pero no se leyó ninguna fila con Calle y Fecha. Revisá el gid/pestaña.', 'error');
+    } else {
+      setStatus(`Actualizado ${now} · ${totalRows} filas · ${records.length} con coordenadas · ${noCoord} sin coordenadas`, 'ok');
+    }
   } catch (err) {
     console.error(err);
     setStatus('No se pudo leer la planilla. Verificá que esté compartida como "Cualquiera con el enlace".', 'error');
