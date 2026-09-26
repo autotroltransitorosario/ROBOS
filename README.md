@@ -1,80 +1,113 @@
-# Mapa de Artefactos Robados — Rosario
+# Mapa de Artefactos Robados — Rosario (datos en vivo desde Google Sheets)
 
 PWA que muestra sobre un mapa de OpenStreetMap los reportes de robo de
-equipamiento de alumbrado público, con pines rojos, popup de detalle al
-hacer click, y un filtro de fecha horizontal y scrolleable ("desde tal
-fecha en adelante").
+equipamiento de alumbrado público, leyendo la planilla de Google Sheets
+**en vivo** (cada vez que se abre la app, y cada 3 minutos mientras queda
+abierta, además de un botón "Actualizar" manual).
+
+## Requisito imprescindible: compartir la hoja
+
+La app lee la planilla desde el navegador de cada usuario, sin login. Para
+que funcione, la hoja tiene que estar compartida como:
+
+> **Compartir → "Cualquier persona con el enlace" → Lector**
+
+Si no está así compartida, la app va a mostrar el aviso "No se pudo leer
+la planilla…" en la esquina inferior derecha del mapa.
+
+## Columna de coordenadas
+
+La app solo dibuja un pin cuando la fila tiene coordenadas cargadas en la
+columna **`COORDENADAS`**, en una sola celda, con el formato:
+
+```
+lat, lng
+```
+
+Ejemplo: `-32.9468, -60.6393`
+
+Las filas sin esa columna completa (o con un valor que no se pueda leer
+como dos números) **no se muestran en el mapa**, pero se cuentan en el
+indicador "Sin coordenadas" del encabezado, para que el equipo sepa
+cuántas direcciones todavía faltan geo-referenciar.
+
+## Configuración (ID de la hoja)
+
+Al principio de `js/app.js` está el bloque `CONFIG`:
+
+```js
+const CONFIG = {
+  sheetId: '1_xGUEmaW9OEGxTIeBRVtc8Qdkfh_et6QGL0DfEZzBOk',
+  gid: '619088428',
+  ...
+```
+
+Si en algún momento cambian de planilla o de pestaña, solo hay que
+actualizar `sheetId` y `gid` (el `gid` es el número que aparece al final
+de la URL cuando tenés la pestaña abierta, después de `#gid=`).
+
+También ahí están mapeados los nombres de columna esperados (case
+insensitive): `Nro Solicitud`, `Fecha Hora Registro`, `Calle`, `Altura`,
+`Equipamiento Robado`, `Cantidad`, `Numero de Denuncia`, `Ubicacion`,
+`Coordenadas`. Si cambia el nombre de alguna columna en la planilla, hay
+que actualizar ese mapeo.
+
+## Filtro de fecha por rango (desde–hasta)
+
+La franja de fechas debajo del encabezado es scrolleable horizontalmente.
+Funciona por toques:
+
+1. Tocás una fecha → queda fijada como **"desde"**.
+2. Tocás otra fecha (posterior) → queda fijada como **"hasta"**. El mapa
+   muestra únicamente los puntos entre esas dos fechas (inclusive).
+3. Tocás cualquier fecha de nuevo → arranca una selección nueva.
+4. Botón **"Ver todo el período"** → saca el filtro.
 
 ## Estructura
 
 ```
 index.html        Shell de la app
 css/styles.css     Estilos
-js/app.js          Lógica: carga de datos, geocodificación, mapa, filtro
-data.json          Datos limpios (derivados de la planilla de Google Sheets)
+js/app.js          Lógica: lectura en vivo de Sheets, mapa, filtro por rango
 manifest.json      Manifest de la PWA (icono, nombre, colores)
-sw.js              Service worker (cachea el shell para uso offline)
+sw.js              Service worker (cachea solo el shell propio, offline)
 icons/             Íconos 192x192 y 512x512
 ```
 
-## Cómo correrlo localmente
+## Cómo correrlo / desplegarlo
 
-Los navegadores bloquean `fetch()` a `data.json` si abrís el archivo
-directamente con doble click (protocolo `file://`). Hay que servirlo por
-http, por ejemplo:
+Basta con servir estos archivos estáticos por HTTP(S) — no hace falta
+backend propio, ya que los datos se leen directo desde Google:
 
 ```bash
-cd pwa
 python3 -m http.server 8080
 # o: npx serve .
 ```
 
-Y abrir `http://localhost:8080`.
+Para que sea instalable de verdad (y para que el Service Worker
+funcione) hace falta HTTPS, salvo en `localhost`. Opciones simples:
+GitHub Pages, Netlify o Vercel.
 
-## Cómo desplegarlo (para que sea instalable de verdad)
+## Cómo funciona la lectura de la planilla (técnico)
 
-Una PWA necesita HTTPS (salvo en `localhost`) para poder instalarse y
-para que el Service Worker funcione. Opciones simples y gratuitas:
+La app usa el endpoint público de "Google Visualization" de la hoja:
 
-- **GitHub Pages**: subir esta carpeta a un repo y activar Pages.
-- **Netlify / Vercel**: arrastrar la carpeta o conectar el repo.
+```
+https://docs.google.com/spreadsheets/d/<ID>/gviz/tq?tqx=out:json&gid=<GID>
+```
 
-## Geocodificación de direcciones
+A diferencia del link de exportación CSV normal, este endpoint sí
+responde con los encabezados CORS necesarios para poder leerlo desde
+JavaScript en cualquier dominio — por eso se usa este y no `/export?format=csv`.
+No requiere API key, pero sí que la hoja esté compartida por enlace
+(ver arriba).
 
-La planilla trae **calle y altura, pero no coordenadas**. La app resuelve
-cada dirección a lat/lon en el navegador del usuario, usando el servicio
-público de geocodificación de OpenStreetMap (Nominatim):
+## Notas sobre calidad de datos
 
-- Se agrupan direcciones repetidas para no pedir lo mismo dos veces.
-- Se respeta el límite de uso de Nominatim (máx. ~1 solicitud/segundo),
-  por eso la primera carga completa tarda varios minutos con ~500
-  direcciones distintas — se ve una barra de progreso mientras tanto,
-  y los puntos van apareciendo a medida que se resuelven.
-- Los resultados se guardan en `localStorage` del navegador, así que
-  **las cargas siguientes son instantáneas** (no se vuelve a geocodificar
-  lo ya resuelto).
-- Si vas a usar esto en producción con tráfico real o muchas actualizaciones
-  de la planilla, conviene migrar a un servicio de geocodificación con
-  cuota propia (Nominatim autoalojado, Mapbox, Google Geocoding, etc.) en
-  vez del servicio público gratuito.
-
-## Actualizar los datos
-
-`data.json` es una exportación estática de la planilla al momento de
-generar esta app. Para actualizarlo:
-
-1. Exportar la hoja de Google Sheets como CSV.
-2. Volver a correr el script de limpieza (columnas esperadas: `Nro
-   Solicitud`, `Fecha Hora Registro`, `Calle`, `Altura`, `Equipamiento
-   Robado`, `Cantidad`, `Numero de Denuncia`, `Ubicacion`).
-3. Reemplazar `data.json`.
-
-### Notas sobre la calidad de los datos originales
-
-- Se excluyeron 18 filas sin calle o sin fecha, y 6 filas con fechas
-  claramente erróneas en la planilla (`02/02/202`, `07/07/2027`).
-- La columna `Numero de Denuncia` casi siempre dice "OK"/"ok" en vez de
-  un número real; se muestra tal cual viene.
-- `Ubicacion` a veces es un link de Google Drive (foto) y a veces es
-  texto libre ("VER IMAGEN..."); la app muestra un link cliqueable solo
-  cuando es una URL válida.
+- Se ignoran filas sin `Calle` o sin `Fecha Hora Registro`.
+- Se ignoran fechas con años fuera de 2020–2035 (typos evidentes de la
+  planilla, ej. `07/07/2027`).
+- `Numero de Denuncia` casi siempre trae "OK"/"ok" en vez de un número
+  real; se muestra tal cual viene.
+- `Ubicacion` a veces es un link (foto) y a veces texto libre; la app
+  muestra un link cliqueable solo cuando es una URL válida.

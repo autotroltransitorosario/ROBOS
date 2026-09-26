@@ -1,16 +1,17 @@
-const CACHE_NAME = 'artefactos-robados-v1';
+const CACHE_NAME = 'artefactos-robados-v2';
 const APP_SHELL = [
   './',
   './index.html',
   './css/styles.css',
   './js/app.js',
-  './data.json',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png'
 ];
 
-// Instala y cachea el shell de la app (todo lo que no dependa de red externa)
+// Instala y cachea el shell de la app (HTML/CSS/JS propios).
+// Los datos (Google Sheets) y los tiles de mapa NO se cachean acá:
+// son externos y tienen que leerse en vivo.
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL))
@@ -18,7 +19,6 @@ self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
 
-// Limpia caches viejas
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
@@ -28,14 +28,11 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Estrategia: cache-first para el shell propio, red directa para todo lo externo
-// (tiles de OpenStreetMap y geocodificación de Nominatim requieren conexión;
-// no se cachean porque cambian y porque cachear tiles agotaría rápido la cuota).
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   const isOwnOrigin = url.origin === self.location.origin;
 
-  if (!isOwnOrigin) return; // dejar pasar tiles/nominatim tal cual, sin interceptar
+  if (!isOwnOrigin) return; // tiles de OSM y la hoja de Google pasan directo, sin cache
 
   event.respondWith(
     caches.match(event.request).then((cached) => {

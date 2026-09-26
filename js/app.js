@@ -1,53 +1,99 @@
 /* =========================================================================
-   Mapa de Artefactos Robados — Rosario
-   - Carga data.json (reportes ya limpiados desde la planilla)
-   - Geocodifica direcciones con Nominatim (OpenStreetMap) en el navegador,
-     con cache en localStorage para no repetir búsquedas entre sesiones
-   - Dibuja pines rojos sobre un mapa OSM (Leaflet)
-   - Filtro de fecha horizontal y scrolleable: al elegir una fecha se
-     muestran todos los puntos desde esa fecha en adelante
+   Mapa de Artefactos Robados — Rosario (fuente: Google Sheets en vivo)
+
+   - Lee la planilla editable directamente en el navegador del usuario
+     usando el endpoint público "gviz" de Google (pensado justamente para
+     que otras páginas consuman una hoja como fuente de datos, por eso
+     responde con CORS habilitado a diferencia del export CSV normal).
+   - Solo se muestran las filas que tienen coordenadas válidas cargadas
+     en la columna COORDENADAS ("lat, lng" en una misma celda).
+   - Filtro de fecha horizontal y scrolleable, por RANGO (desde/hasta):
+     primer toque fija el "desde", segundo toque fija el "hasta".
    ========================================================================= */
 
 const CONFIG = {
-  city: 'Rosario',
+  // -------- Fuente de datos: Google Sheets --------
+  sheetId: '1_xGUEmaW9OEGxTIeBRVtc8Qdkfh_et6QGL0DfEZzBOk',
+  gid: '619088428',
+  autoRefreshMs: 3 * 60 * 1000, // recarga la planilla cada 3 minutos
+
+  // -------- Mapa --------
   mapCenter: [-32.9468, -60.6393],
   mapZoom: 13,
-  nominatimUrl: 'https://nominatim.openstreetmap.org/search',
-  geocodeDelayMs: 1100, // Nominatim: máx. ~1 solicitud por segundo
-  cacheKey: 'geocodeCacheV1'
+
+  // Nombres de columnas esperados en la planilla (case-insensitive)
+  columns: {
+    nro: 'nro solicitud',
+    fecha: 'fecha hora registro',
+    calle: 'calle',
+    altura: 'altura',
+    equipamiento: 'equipamiento robado',
+    cantidad: 'cantidad',
+    denuncia: 'numero de denuncia',
+    ubicacion: 'ubicacion',
+    coordenadas: 'coordenadas'
+  }
 };
 
+function sheetUrl() {
+  return `https://docs.google.com/spreadsheets/d/${CONFIG.sheetId}/gviz/tq?tqx=out:json&gid=${CONFIG.gid}&headers=1&_=${Date.now()}`;
+}
+
 const state = {
-  records: [],          // todos los registros del CSV
-  byQuery: new Map(),   // geo_query -> [records]
-  coords: new Map(),    // geo_query -> {lat, lon} | null (si falló)
-  markers: new Map(),   // record.id -> L.Marker
-  fixedDate: null,      // fecha ISO fija del filtro, o null = todas
+  records: [],           // filas con coordenadas válidas
+  totalRows: 0,          // filas totales leídas de la planilla
+  noCoordCount: 0,
+  markers: new Map(),    // record.id -> L.Marker
+  rangeStart: null,      // fecha ISO
+  rangeEnd: null,        // fecha ISO
   map: null,
-  markerLayer: null
+  markerLayer: null,
+  refreshTimer: null
 };
 
 // ---------- Utilidades ----------
-function loadCache() {
-  try {
-    const raw = localStorage.getItem(CONFIG.cacheKey);
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) {
-    return {};
-  }
-}
-function saveCache(cache) {
-  try {
-    localStorage.setItem(CONFIG.cacheKey, JSON.stringify(cache));
-  } catch (e) {
-    /* localStorage lleno o no disponible: seguimos sin persistir */
-  }
-}
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
 function formatDateEs(iso) {
   const [y, m, d] = iso.split('-');
   return `${d}/${m}/${y}`;
+}
+
+// Acepta "DD/MM/YYYY" o "DD/MM/YYYY HH:MM" (con - o / como separador de fecha)
+function parseFechaFlexible(raw) {
+  if (!raw) return null;
+  const m = String(raw).trim().match(
+    /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2}))?/
+  );
+  if (!m) return null;
+  let [, d, mo, y, h, mi] = m;
+  d = parseInt(d, 10); mo = parseInt(mo, 10); y = parseInt(y, 10);
+  if (y < 100) y += 2000;
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  if (y < 2020 || y > 2035) return null; // filtra typos evidentes de años
+  const iso = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const display = h !== undefined
+    ? `${String(d).padStart(2,'0')}/${String(mo).padStart(2,'0')}/${y} ${h.padStart(2,'0')}:${mi}`
+    : `${String(d).padStart(2,'0')}/${String(mo).padStart(2,'0')}/${y}`;
+  return { iso, display };
+}
+
+// Acepta "lat, lng" o "lat,lng" en una misma celda
+function parseCoordenadas(raw) {
+  if (!raw) return null;
+  const parts = String(raw).split(',').map((s) => s.trim());
+  if (parts.length !== 2) return null;
+  const lat = parseFloat(parts[0].replace(',', '.'));
+  const lon = parseFloat(parts[1].replace(',', '.'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  if (lat === 0 && lon === 0) return null;
+  return { lat, lon };
+}
+
+function cellText(row, idx) {
+  if (idx === -1) return '';
+  const cell = row.c[idx];
+  if (!cell || cell.v === null || cell.v === undefined) return '';
+  return String(cell.v).trim();
 }
 
 // ---------- Service worker ----------
@@ -94,169 +140,217 @@ function popupHtml(rec) {
   return `<div class="popup-card"><p class="addr">${rec.direccion}</p><dl>${dl}</dl></div>`;
 }
 
-function addMarkerForRecord(rec, latlng) {
-  const marker = L.marker(latlng, { icon: redIcon() });
-  marker.bindPopup(popupHtml(rec));
-  marker.recFechaIso = rec.fecha_iso;
-  state.markers.set(rec.id, marker);
-  if (passesFilter(rec)) marker.addTo(state.markerLayer);
-  updateStats();
+function rebuildMarkers() {
+  state.markerLayer.clearLayers();
+  state.markers.clear();
+  state.records.forEach((rec) => {
+    const marker = L.marker([rec.lat, rec.lon], { icon: redIcon() });
+    marker.bindPopup(popupHtml(rec));
+    marker.recFechaIso = rec.fecha_iso;
+    state.markers.set(rec.id, marker);
+  });
+  applyFilter();
+  if (state.records.length) {
+    const bounds = L.latLngBounds(state.records.map((r) => [r.lat, r.lon]));
+    state.map.fitBounds(bounds.pad(0.15));
+  }
 }
 
-function passesFilter(rec) {
-  if (!state.fixedDate) return true;
-  return rec.fecha_iso >= state.fixedDate;
+function passesFilter(fechaIso) {
+  if (state.rangeStart && fechaIso < state.rangeStart) return false;
+  if (state.rangeEnd && fechaIso > state.rangeEnd) return false;
+  return true;
 }
 
 function applyFilter() {
   state.markerLayer.clearLayers();
+  let visible = 0;
   state.markers.forEach((marker) => {
-    if (passesFilter({ fecha_iso: marker.recFechaIso })) {
+    if (passesFilter(marker.recFechaIso)) {
       marker.addTo(state.markerLayer);
+      visible++;
     }
   });
-  updateStats();
-}
-
-function updateStats() {
-  document.getElementById('stat-total').textContent = state.records.length;
-  let visible = 0;
-  state.markers.forEach((m) => { if (state.markerLayer.hasLayer(m)) visible++; });
   document.getElementById('stat-visible').textContent = visible;
 }
 
-// ---------- Filtro de fecha (scrolleable) ----------
+// ---------- Filtro de rango de fechas (scrolleable) ----------
 function buildDateFilter(uniqueDates, countsByDate) {
   const scroll = document.getElementById('date-scroll');
   scroll.innerHTML = '';
-
   uniqueDates.forEach((iso) => {
     const chip = document.createElement('button');
     chip.className = 'date-chip';
     chip.dataset.date = iso;
     chip.innerHTML = `${formatDateEs(iso)}<span class="n">${countsByDate[iso]}</span>`;
-    chip.addEventListener('click', () => setFixedDate(iso));
+    chip.addEventListener('click', () => onChipClick(iso));
     scroll.appendChild(chip);
   });
 }
 
-function setFixedDate(iso) {
-  state.fixedDate = iso;
-  document.getElementById('filter-date-label').textContent = formatDateEs(iso);
-  document.querySelectorAll('.date-chip').forEach((chip) => {
-    chip.classList.toggle('active', chip.dataset.date === iso);
-    chip.classList.toggle('before', chip.dataset.date < iso);
-  });
+function onChipClick(iso) {
+  if (!state.rangeStart || (state.rangeStart && state.rangeEnd)) {
+    // arranca una selección nueva
+    state.rangeStart = iso;
+    state.rangeEnd = null;
+  } else if (iso < state.rangeStart) {
+    // tocaron una fecha anterior al "desde": se convierte en el nuevo "desde"
+    state.rangeStart = iso;
+  } else {
+    state.rangeEnd = iso;
+  }
+  refreshRangeUI();
   applyFilter();
-  // centra el chip elegido en el scroll
-  const activeChip = document.querySelector('.date-chip.active');
-  if (activeChip) activeChip.scrollIntoView({ inline: 'center', behavior: 'smooth', block: 'nearest' });
+}
+
+function refreshRangeUI() {
+  const label = document.getElementById('filter-range-label');
+  if (state.rangeStart && state.rangeEnd) {
+    label.textContent = `${formatDateEs(state.rangeStart)} → ${formatDateEs(state.rangeEnd)}`;
+  } else if (state.rangeStart) {
+    label.textContent = `desde ${formatDateEs(state.rangeStart)} (elegí el "hasta")`;
+  } else {
+    label.textContent = 'todo el período';
+  }
+
+  document.querySelectorAll('.date-chip').forEach((chip) => {
+    const d = chip.dataset.date;
+    const isStart = d === state.rangeStart;
+    const isEnd = d === state.rangeEnd;
+    const inRange = state.rangeStart && state.rangeEnd && d > state.rangeStart && d < state.rangeEnd;
+    chip.classList.toggle('active', isStart || isEnd);
+    chip.classList.toggle('in-range', !!inRange);
+  });
 }
 
 function resetFilter() {
-  state.fixedDate = null;
-  document.getElementById('filter-date-label').textContent = 'todas las fechas';
-  document.querySelectorAll('.date-chip').forEach((chip) => {
-    chip.classList.remove('active', 'before');
-  });
+  state.rangeStart = null;
+  state.rangeEnd = null;
+  refreshRangeUI();
   applyFilter();
 }
 
-// ---------- Geocodificación (Nominatim, client-side, con cache) ----------
-async function geocodeOne(query) {
-  const url = `${CONFIG.nominatimUrl}?format=json&limit=1&countrycodes=ar&q=${encodeURIComponent(query)}`;
-  try {
-    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (json && json[0]) {
-      return { lat: parseFloat(json[0].lat), lon: parseFloat(json[0].lon) };
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
+// ---------- Carga de datos desde Google Sheets ----------
+function setStatus(text, kind) {
+  const el = document.getElementById('data-status');
+  el.textContent = text;
+  el.className = 'data-status' + (kind ? ' ' + kind : '');
 }
 
-async function runGeocodingQueue() {
-  const cache = loadCache();
-  const queries = Array.from(state.byQuery.keys());
-  const pending = queries.filter((q) => !(q in cache));
+async function fetchSheet() {
+  const res = await fetch(sheetUrl());
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const text = await res.text();
+  const match = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\);?\s*$/);
+  if (!match) throw new Error('Respuesta inesperada de Google Sheets');
+  const json = JSON.parse(match[1]);
+  if (json.status === 'error') {
+    const msg = (json.errors && json.errors[0] && json.errors[0].detailed_message) || 'error desconocido';
+    throw new Error(msg);
+  }
+  return json.table;
+}
 
-  const progressEl = document.getElementById('geo-progress');
-  const countEl = document.getElementById('geo-count');
-  const barEl = document.getElementById('geo-bar');
-  const totalToProcess = pending.length;
-  let done = 0;
+function colIndex(labels, wanted) {
+  return labels.findIndex((l) => (l || '').trim().toLowerCase() === wanted);
+}
 
-  // Primero, volcar al mapa todo lo que ya estaba en cache (instantáneo)
-  queries.forEach((q) => {
-    if (q in cache && cache[q]) {
-      placeRecordsForQuery(q, cache[q]);
-    }
+function processTable(table) {
+  const labels = table.cols.map((c) => c.label);
+  const idx = {};
+  Object.entries(CONFIG.columns).forEach(([key, wanted]) => {
+    idx[key] = colIndex(labels, wanted);
   });
-  updateStats();
 
-  if (totalToProcess === 0) {
-    progressEl.classList.add('done');
-    return;
-  }
+  const records = [];
+  let totalRows = 0;
+  let noCoord = 0;
 
-  countEl.textContent = `0 / ${totalToProcess}`;
+  (table.rows || []).forEach((row) => {
+    if (!row.c) return;
+    const calle = cellText(row, idx.calle);
+    const fechaRaw = cellText(row, idx.fecha);
+    if (!calle || !fechaRaw) return; // fila sin datos mínimos, se ignora
+    totalRows++;
 
-  for (const query of pending) {
-    const coords = await geocodeOne(query);
-    cache[query] = coords; // null si no se encontró, para no reintentar siempre
-    if (coords) placeRecordsForQuery(query, coords);
+    const coordRaw = cellText(row, idx.coordenadas);
+    const coords = parseCoordenadas(coordRaw);
+    if (!coords) { noCoord++; return; } // solo mostramos puntos con coordenadas
 
-    done++;
-    countEl.textContent = `${done} / ${totalToProcess}`;
-    barEl.style.width = `${Math.round((done / totalToProcess) * 100)}%`;
+    const fecha = parseFechaFlexible(fechaRaw);
+    if (!fecha) { noCoord++; return; }
 
-    if (done % 15 === 0) saveCache(cache); // guardado incremental
-    await sleep(CONFIG.geocodeDelayMs);
-  }
+    const altura = cellText(row, idx.altura);
+    const direccion = altura ? `${calle} ${altura}` : calle;
 
-  saveCache(cache);
-  progressEl.classList.add('done');
+    records.push({
+      id: records.length,
+      nro_solicitud: cellText(row, idx.nro),
+      fecha_iso: fecha.iso,
+      fecha_display: fecha.display,
+      calle, altura, direccion,
+      equipamiento: cellText(row, idx.equipamiento),
+      cantidad: cellText(row, idx.cantidad),
+      denuncia: cellText(row, idx.denuncia),
+      ubicacion: cellText(row, idx.ubicacion),
+      lat: coords.lat,
+      lon: coords.lon
+    });
+  });
+
+  return { records, totalRows, noCoord };
 }
 
-function placeRecordsForQuery(query, coords) {
-  const recs = state.byQuery.get(query) || [];
-  recs.forEach((rec) => addMarkerForRecord(rec, [coords.lat, coords.lon]));
+async function loadData(isManualRefresh) {
+  const btn = document.getElementById('btn-refresh');
+  btn.disabled = true;
+  setStatus(isManualRefresh ? 'Releyendo planilla…' : 'Cargando planilla…');
+
+  try {
+    const table = await fetchSheet();
+    const { records, totalRows, noCoord } = processTable(table);
+
+    state.records = records;
+    state.totalRows = totalRows;
+    state.noCoordCount = noCoord;
+
+    document.getElementById('stat-total').textContent = records.length;
+    document.getElementById('stat-nocoord').textContent = noCoord;
+
+    const countsByDate = {};
+    records.forEach((r) => { countsByDate[r.fecha_iso] = (countsByDate[r.fecha_iso] || 0) + 1; });
+    const uniqueDates = Object.keys(countsByDate).sort();
+    if (uniqueDates.length) {
+      document.getElementById('stat-range').textContent =
+        `${formatDateEs(uniqueDates[0])} – ${formatDateEs(uniqueDates[uniqueDates.length - 1])}`;
+    } else {
+      document.getElementById('stat-range').textContent = '—';
+    }
+
+    buildDateFilter(uniqueDates, countsByDate);
+    refreshRangeUI();
+    rebuildMarkers();
+
+    const now = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+    setStatus(`Actualizado ${now} · ${records.length} con coordenadas`, 'ok');
+  } catch (err) {
+    console.error(err);
+    setStatus('No se pudo leer la planilla. Verificá que esté compartida como "Cualquiera con el enlace".', 'error');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
-// ---------- Carga de datos e inicio ----------
-async function main() {
+// ---------- Inicio ----------
+function main() {
   initMap();
   document.getElementById('btn-reset').addEventListener('click', resetFilter);
+  document.getElementById('btn-refresh').addEventListener('click', () => loadData(true));
 
-  const res = await fetch('data.json');
-  const records = await res.json();
-  state.records = records;
+  loadData(false);
 
-  // Agrupar por dirección de geocodificación (evita pedir lo mismo dos veces)
-  records.forEach((rec) => {
-    if (!state.byQuery.has(rec.geo_query)) state.byQuery.set(rec.geo_query, []);
-    state.byQuery.get(rec.geo_query).push(rec);
-  });
-
-  // Fechas únicas, ordenadas, con conteo de reportes por día
-  const countsByDate = {};
-  records.forEach((rec) => {
-    countsByDate[rec.fecha_iso] = (countsByDate[rec.fecha_iso] || 0) + 1;
-  });
-  const uniqueDates = Object.keys(countsByDate).sort();
-
-  document.getElementById('stat-total').textContent = records.length;
-  document.getElementById('stat-visible').textContent = records.length;
-  if (uniqueDates.length) {
-    document.getElementById('stat-range').textContent =
-      `${formatDateEs(uniqueDates[0])} – ${formatDateEs(uniqueDates[uniqueDates.length - 1])}`;
-  }
-
-  buildDateFilter(uniqueDates, countsByDate);
-  runGeocodingQueue();
+  if (state.refreshTimer) clearInterval(state.refreshTimer);
+  state.refreshTimer = setInterval(() => loadData(false), CONFIG.autoRefreshMs);
 }
 
 main();

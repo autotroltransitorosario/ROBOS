@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Mapa de Artefactos Robados · Rosario</title>
-<meta name="description" content="Mapa de reportes de robo de equipamiento de alumbrado público en Rosario">
+<meta name="description" content="Mapa en vivo de reportes de robo de equipamiento de alumbrado público en Rosario">
 <meta name="theme-color" content="#1B2430">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icons/icon-192.png">
@@ -19,18 +19,21 @@
   <header class="topbar">
     <h1>Mapa de <span>Artefactos Robados</span> · Rosario</h1>
     <div class="stats" id="stats">
-      <span>Puntos: <b id="stat-total">–</b></span>
+      <span>Con coordenadas: <b id="stat-total">–</b></span>
       <span>Visibles: <b id="stat-visible">–</b></span>
+      <span class="dim">Sin coordenadas: <b id="stat-nocoord">–</b></span>
       <span>Período: <b id="stat-range">–</b></span>
+      <button class="btn-refresh" id="btn-refresh" title="Releer la planilla ahora">⟳ Actualizar</button>
     </div>
   </header>
 
   <div class="datefilter">
     <div class="filter-row">
-      <span class="filter-label">Mostrando desde <strong id="filter-date-label">todas las fechas</strong></span>
+      <span class="filter-label">Rango: <strong id="filter-range-label">todo el período</strong></span>
       <button class="btn-reset" id="btn-reset">Ver todo el período</button>
     </div>
-    <div class="date-scroll" id="date-scroll" aria-label="Filtro de fecha, desplazable"></div>
+    <div class="date-scroll" id="date-scroll" aria-label="Filtro de fecha por rango, desplazable"></div>
+    <p class="hint">Tocá una fecha para fijar el <b>desde</b>, y otra fecha para fijar el <b>hasta</b>.</p>
   </div>
 
   <div class="map-wrap">
@@ -38,10 +41,7 @@
     <div class="map-badge">
       Robos de equipamiento de alumbrado público — Rosario
     </div>
-    <div class="geo-progress" id="geo-progress">
-      Ubicando direcciones… <span id="geo-count">0 / 0</span>
-      <div class="bar"><i id="geo-bar"></i></div>
-    </div>
+    <div class="data-status" id="data-status">Cargando planilla…</div>
   </div>
 
 </div>
