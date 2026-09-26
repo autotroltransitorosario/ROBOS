@@ -95,7 +95,14 @@ function parseCoordenadas(raw) {
 function cellText(row, idx) {
   if (idx === -1) return '';
   const cell = row.c[idx];
-  if (!cell || cell.v === null || cell.v === undefined) return '';
+  if (!cell) return '';
+  // Preferimos el valor "formateado" (lo que se ve en la celda). Es clave
+  // para columnas de fecha/hora reales: si Sheets guarda la celda como
+  // tipo Fecha (no texto), el valor interno (.v) llega como
+  // "Date(2025,9,30,19,58,0)" en vez del texto visible "30/10/2025 19:58",
+  // que sí está en .f.
+  if (cell.f !== undefined && cell.f !== null && cell.f !== '') return String(cell.f).trim();
+  if (cell.v === null || cell.v === undefined) return '';
   return String(cell.v).trim();
 }
 
@@ -271,9 +278,9 @@ function processTable(table) {
 
   const records = [];
   let totalRows = 0;
-  let noCoord = 0;
   let emptyCoordCell = 0;
-  let unparsableSamples = [];
+  let unparsableCoordSamples = [];
+  let unparsableDateSamples = [];
 
   (table.rows || []).forEach((row) => {
     if (!row.c) return;
@@ -285,17 +292,19 @@ function processTable(table) {
     const coordRaw = cellText(row, idx.coordenadas);
     const coords = parseCoordenadas(coordRaw);
     if (!coords) {
-      noCoord++;
       if (!coordRaw) {
         emptyCoordCell++;
-      } else if (unparsableSamples.length < 5) {
-        unparsableSamples.push(coordRaw);
+      } else if (unparsableCoordSamples.length < 5) {
+        unparsableCoordSamples.push(coordRaw);
       }
       return; // solo mostramos puntos con coordenadas
     }
 
     const fecha = parseFechaFlexible(fechaRaw);
-    if (!fecha) { noCoord++; return; }
+    if (!fecha) {
+      if (unparsableDateSamples.length < 5) unparsableDateSamples.push(fechaRaw);
+      return;
+    }
 
     const altura = cellText(row, idx.altura);
     const direccion = altura ? `${calle} ${altura}` : calle;
@@ -315,7 +324,11 @@ function processTable(table) {
     });
   });
 
-  return { records, totalRows, noCoord, missing, labels, emptyCoordCell, unparsableSamples };
+  const noCoord = totalRows - records.length;
+  return {
+    records, totalRows, noCoord, missing, labels,
+    emptyCoordCell, unparsableCoordSamples, unparsableDateSamples
+  };
 }
 
 async function loadData(isManualRefresh) {
@@ -325,7 +338,7 @@ async function loadData(isManualRefresh) {
 
   try {
     const table = await fetchSheet();
-    const { records, totalRows, noCoord, missing, labels, emptyCoordCell, unparsableSamples } = processTable(table);
+    const { records, totalRows, noCoord, missing, labels, emptyCoordCell, unparsableCoordSamples, unparsableDateSamples } = processTable(table);
 
     state.records = records;
     state.totalRows = totalRows;
@@ -355,13 +368,18 @@ async function loadData(isManualRefresh) {
       setStatus(`Faltan columnas: ${missing.join(', ')}. Encabezados leídos: ${labels.filter(Boolean).join(' | ')}`, 'error');
     } else if (records.length === 0 && totalRows > 0 && emptyCoordCell === totalRows) {
       setStatus(`${totalRows} filas leídas, pero la columna Coordenadas está vacía en todas. Cargá al menos una para probar.`, 'error');
+    } else if (records.length === 0 && totalRows > 0 && unparsableDateSamples.length > 0) {
+      console.warn('Fechas que no se pudieron interpretar:', unparsableDateSamples);
+      setStatus(`${totalRows} filas · ${emptyCoordCell} sin coordenadas. Las que sí tienen coordenadas fallan por FECHA. Ejemplo: "${unparsableDateSamples[0]}"`, 'error');
     } else if (records.length === 0 && totalRows > 0) {
-      console.warn('Valores de Coordenadas que no se pudieron interpretar:', unparsableSamples);
-      setStatus(`${totalRows} filas leídas. ${emptyCoordCell} sin nada en Coordenadas, y ${totalRows - emptyCoordCell} con un valor que no pude interpretar (ver consola: ${unparsableSamples.slice(0,2).join(' | ')})`, 'error');
+      console.warn('Coordenadas que no se pudieron interpretar:', unparsableCoordSamples);
+      setStatus(`${totalRows} filas · ${emptyCoordCell} sin coordenadas. Las que tienen algo cargado no se pudieron interpretar. Ejemplo: "${unparsableCoordSamples[0] || ''}"`, 'error');
     } else if (totalRows === 0) {
       setStatus('La planilla respondió, pero no se leyó ninguna fila con Calle y Fecha. Revisá el gid/pestaña.', 'error');
     } else {
-      setStatus(`Actualizado ${now} · ${totalRows} filas · ${records.length} con coordenadas · ${noCoord} sin coordenadas`, 'ok');
+      let extra = '';
+      if (unparsableDateSamples.length) extra = ` · ${unparsableDateSamples.length}+ con fecha no reconocida`;
+      setStatus(`Actualizado ${now} · ${totalRows} filas · ${records.length} con coordenadas · ${emptyCoordCell} sin coordenadas${extra}`, 'ok');
     }
   } catch (err) {
     console.error(err);
